@@ -1,0 +1,22 @@
+# Phase 4: Vision Integration
+model:
+  # Inherits from phase2/3 model config
+  vision:
+    encoder: siglip-so400m-patch14-384
+    image_size: 384
+    patch_size: 14
+    vision_dim: 1152
+    freeze_encoder: true  # Phase 4a; set false for Phase 4b
+
+training:
+  phase: vision
+  batch_size: 8
+  gradient_accumulation_steps: 8
+  max_steps: 100000
+  gradient_clip: 1.0
+
+hardware:
+  device: cuda
+  num_gpus: 8
+  precision: bf16
+  strategy: fsdp

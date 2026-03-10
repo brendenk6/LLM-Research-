@@ -1,0 +1,9 @@
+# 8-GPU FSDP configuration
+backend: nccl
+num_gpus: 8
+strategy: fsdp
+fsdp:
+  sharding_strategy: FULL_SHARD
+  mixed_precision: bf16
+  activation_checkpointing: true
+  cpu_offload: false

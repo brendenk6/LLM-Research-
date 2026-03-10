@@ -1,0 +1,9 @@
+# Bootstrap phase data configuration
+dataset: fineweb-edu
+quality_threshold: 0.7
+max_seq_len: 4096
+batch_size: 32
+num_workers: 4
+deduplication: minhash
+language: en
+min_length_tokens: 128

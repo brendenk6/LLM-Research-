@@ -1,0 +1,4 @@
+# Single GPU configuration
+backend: nccl
+num_gpus: 1
+strategy: none

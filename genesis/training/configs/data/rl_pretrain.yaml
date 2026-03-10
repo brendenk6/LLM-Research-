@@ -1,0 +1,9 @@
+# RL pretraining phase data configuration
+dataset: fineweb-edu
+quality_threshold: 0.7
+max_seq_len: 4096
+batch_size: 16
+num_workers: 4
+reasoning_max_tokens: 64
+num_candidates: 4
+hard_token_threshold: 0.1

@@ -1,0 +1,13 @@
+# Vision phase data configuration
+datasets:
+  - llava_1_5_mixture
+  - llava_instruct
+  - docvqa
+  - chartqa
+  - scienceqa
+image_size: 384
+patch_size: 14
+max_seq_len: 4096
+batch_size: 8
+num_workers: 4
+freeze_vision_encoder: true  # Phase 4a

@@ -1,0 +1,10 @@
+# Flywheel phase data configuration
+web_data_fraction: 0.5
+trace_data_fraction: 0.5
+flywheel_buffer_size: 1000000
+min_improvement_ratio: 2.0
+max_trace_length: 256
+quality_threshold: 0.7
+max_seq_len: 4096
+batch_size: 16
+num_workers: 4

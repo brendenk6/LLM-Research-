@@ -1,0 +1,11 @@
+# DiLoCo distributed configuration
+backend: nccl
+strategy: diloco
+diloco:
+  inner_steps: 500
+  outer_lr: 0.7
+  outer_momentum: 0.9
+  gradient_quantization_bits: 4
+  sparse_sync: true
+  fault_tolerance: true
+  max_island_failures: 2
