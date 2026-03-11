@@ -26,6 +26,10 @@ class MuonAdamWHybrid(Optimizer):
         weight_decay_muon:  Decoupled weight decay for Muon params.  Default: 0.0.
         weight_decay_adamw: Weight decay for AdamW params.  Default: 0.01.
         ns_steps:         Newton-Schulz iterations for Muon.  Default: 5.
+        muon_max_aspect_ratio: Max aspect ratio (tall/wide) for Muon eligibility.
+                          Matrices more skewed than this use AdamW instead,
+                          avoiding O(n^2) blowup in Newton-Schulz for embeddings.
+                          Default: 8.
     """
 
     def __init__(
@@ -39,6 +43,7 @@ class MuonAdamWHybrid(Optimizer):
         weight_decay_muon: float = 0.0,
         weight_decay_adamw: float = 0.01,
         ns_steps: int = 5,
+        muon_max_aspect_ratio: float = 8.0,
     ) -> None:
         defaults = dict(
             lr_muon=lr_muon,
@@ -49,6 +54,7 @@ class MuonAdamWHybrid(Optimizer):
             weight_decay_muon=weight_decay_muon,
             weight_decay_adamw=weight_decay_adamw,
             ns_steps=ns_steps,
+            muon_max_aspect_ratio=muon_max_aspect_ratio,
         )
         super().__init__(params, defaults)
 
@@ -100,7 +106,16 @@ class MuonAdamWHybrid(Optimizer):
 
                 grad = p.grad
 
-                if p.dim() == 2:
+                # Route 2D params to Muon only if aspect ratio is reasonable.
+                # Highly non-square matrices (embeddings: 100k x 1024) would
+                # create O(n^2) intermediates in Newton-Schulz — use AdamW.
+                max_ar = group["muon_max_aspect_ratio"]
+                use_muon = (
+                    p.dim() == 2
+                    and max(p.shape) <= min(p.shape) * max_ar
+                )
+
+                if use_muon:
                     # ---- Muon path ----
                     if wd_muon != 0.0:
                         p.mul_(1.0 - lr_muon * wd_muon)
