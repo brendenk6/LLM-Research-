@@ -104,12 +104,12 @@ def build_optimizer(model: HLRT, cfg: dict) -> MuonAdamWHybrid:
     opt_cfg = cfg["optimizer"]
     return MuonAdamWHybrid(
         model.parameters(),
-        lr_muon=opt_cfg.get("muon_lr", 0.02),
-        lr_adamw=opt_cfg.get("adamw_lr", 3e-4),
-        momentum=opt_cfg.get("muon_momentum", 0.95),
-        betas=tuple(opt_cfg.get("adamw_betas", [0.9, 0.999])),
-        weight_decay_adamw=opt_cfg.get("weight_decay", 0.01),
-        ns_steps=opt_cfg.get("ns_iterations", 5),
+        lr_muon=float(opt_cfg.get("muon_lr", 0.02)),
+        lr_adamw=float(opt_cfg.get("adamw_lr", 3e-4)),
+        momentum=float(opt_cfg.get("muon_momentum", 0.95)),
+        betas=tuple(float(b) for b in opt_cfg.get("adamw_betas", [0.9, 0.999])),
+        weight_decay_adamw=float(opt_cfg.get("weight_decay", 0.01)),
+        ns_steps=int(opt_cfg.get("ns_iterations", 5)),
     )
 
 
@@ -137,7 +137,11 @@ def train(
     data_cfg = cfg["data"]
     hw_cfg = cfg.get("hardware", {})
 
-    device = torch.device(hw_cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
+    requested_device = hw_cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+    if requested_device == "cuda" and not torch.cuda.is_available():
+        logger.warning("CUDA requested but not available — falling back to CPU")
+        requested_device = "cpu"
+    device = torch.device(requested_device)
     logger.info("Device: %s", device)
 
     # --- Data ---
@@ -158,8 +162,9 @@ def train(
 
     batch_size = train_cfg.get("batch_size", 64)
     grad_accum = train_cfg.get("gradient_accumulation_steps", 2)
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=data_cfg.get("num_workers", 4), pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    pin = device.type == "cuda"
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=data_cfg.get("num_workers", 4), pin_memory=pin)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=pin)
 
     # --- Model ---
     model = build_model(cfg)
@@ -236,7 +241,7 @@ def train(
                 if grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
-                scheduler.step(global_step // grad_accum)
+                scheduler.step()
                 optimizer.zero_grad()
 
             global_step += 1
