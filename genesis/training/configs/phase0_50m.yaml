@@ -1,0 +1,76 @@
+# Phase 0: 50M Parameter Small-Scale Validation
+# Purpose: Prove the HLRT architecture works end-to-end before scaling up.
+# Train fast on a single GPU, validate loss curves, gating behavior, and tier routing.
+
+model:
+  vocab_size: 32000        # Smaller vocab (SentencePiece/BPE-32k) to save embedding params
+  max_seq_len: 2048
+
+  tier1:
+    layers: 4
+    d_model: 384
+    heads: 6
+    d_ff: 1536
+
+  tier2:
+    layers: 3
+    d_model: 512
+    heads: 8
+    d_ff: 2048
+    latent_vectors_per_chunk: 4
+    chunk_size: 32
+
+  tier3:
+    layers: 2
+    d_model: 384
+    heads: 6
+    d_ff: 1536
+    recurrence_steps: 2
+
+  gate:
+    type: mlp
+    tier2_threshold: 0.3
+    tier3_threshold: 0.7
+
+  dropout: 0.1              # Light regularization at small scale
+  use_flash_attention: true
+  rope_base: 10000.0
+
+optimizer:
+  type: muon_adamw_hybrid
+  muon_lr: 0.02
+  adamw_lr: 3e-4
+  muon_momentum: 0.95
+  adamw_betas: [0.9, 0.999]
+  weight_decay: 0.01
+  ns_iterations: 5
+
+scheduler:
+  type: wsd
+  warmup_steps: 500
+  stable_steps: 9000
+  decay_steps: 500
+  peak_lr: 0.02
+  min_lr: 2e-5
+
+training:
+  phase: bootstrap
+  batch_size: 64
+  gradient_accumulation_steps: 2
+  effective_batch_size: 128
+  max_steps: 10000
+  gradient_clip: 1.0
+  checkpoint_interval: 500
+  eval_interval: 250
+  log_interval: 10
+
+data:
+  dataset: fineweb-edu
+  quality_threshold: 0.7
+  max_seq_len: 2048
+  num_workers: 4
+
+hardware:
+  device: cuda
+  num_gpus: 1
+  precision: bf16
