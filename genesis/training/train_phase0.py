@@ -172,7 +172,7 @@ def train(
 
     # Mixed precision
     use_amp = hw_cfg.get("precision", "bf16") == "bf16" and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=(use_amp and hw_cfg.get("precision") != "bf16"))
+    scaler = torch.amp.GradScaler(device.type, enabled=(use_amp and hw_cfg.get("precision") != "bf16"))
     amp_dtype = torch.bfloat16 if hw_cfg.get("precision") == "bf16" else torch.float16
 
     # --- Optimizer & Scheduler ---
@@ -224,7 +224,7 @@ def train(
             input_ids = batch["input_ids"].to(device)
 
             # Forward + backward with gradient accumulation
-            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+            with torch.amp.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
                 out = model(input_ids)
                 logits = out["logits"][:, :-1, :].contiguous()
                 targets = input_ids[:, 1:].contiguous()
@@ -320,7 +320,7 @@ def evaluate(
     with torch.no_grad():
         for batch in val_loader:
             input_ids = batch["input_ids"].to(device)
-            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+            with torch.amp.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
                 out = model(input_ids)
                 logits = out["logits"][:, :-1, :].contiguous()
                 targets = input_ids[:, 1:].contiguous()
