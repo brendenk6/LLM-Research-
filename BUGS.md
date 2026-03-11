@@ -42,7 +42,70 @@ The prefill pass processes the full prompt and computes a plan vector that captu
 
 ---
 
-## BUG-002: Greedy generation not deterministic across runs
+## BUG-002: ACT-V replay buffer stores batches instead of sequences
+
+**Date**: Mar 10, 2026
+**Severity**: High (crash)
+**Status**: FIXED
+
+### Symptom
+`ACTVTrainer.co_training_step()` crashes with `RuntimeError: Tensors must have same number of dimensions: got 3 and 2` when replay buffer is ready for sampling.
+
+### Root Cause
+`train_generator_step()` stored the full batch `input_ids` (B, S) as a single replay buffer entry. When `train_verifier_step()` later sampled entries and stacked them with `torch.stack()`, it created a 3D tensor (n_replay, B, S) instead of 2D (n_replay, S). The padding logic then tried to concat a 3D tensor with a 2D pad tensor.
+
+### Fix
+Store individual sequences in the replay buffer instead of full batches:
+```python
+# Before: stores entire batch as one entry
+self.replay_buffer.add(input_ids=input_ids, scores=v_scores, ...)
+
+# After: stores each sequence individually
+for i in range(input_ids.size(0)):
+    seq_scores = {k: v[i] for k, v in v_scores.items()}
+    self.replay_buffer.add(input_ids=input_ids[i], scores=seq_scores, ...)
+```
+
+---
+
+## BUG-003: FlywheelTrainer ignores trace_mix_ratio=0
+
+**Date**: Mar 10, 2026
+**Severity**: Medium (incorrect behavior)
+**Status**: FIXED
+
+### Symptom
+Setting `trace_mix_ratio=0.0` still replaces 1 sample per batch from the flywheel buffer, because `max(1, int(B * 0.0))` evaluates to 1.
+
+### Root Cause
+`_mix_with_buffer` checked `buffer.size == 0` but not `trace_mix_ratio <= 0`.
+
+### Fix
+```python
+if self.flywheel_buffer.size == 0 or self.trace_mix_ratio <= 0:
+    return batch
+```
+
+---
+
+## BUG-004: HLRT missing hidden_states in output for distillation
+
+**Date**: Mar 10, 2026
+**Severity**: High (crash)
+**Status**: FIXED
+
+### Symptom
+ACT-V distillation crashes with shape mismatch: `proj_G` expects `(B, d_model)` but receives `(B, vocab_size)`.
+
+### Root Cause
+HLRT's `forward()` only returned `logits` and `aux_loss`. The `_distill()` method in `train_actv.py` falls back to `gen_out["logits"]` when `"hidden_states"` isn't available, but logits have shape `(B, S, vocab_size)` while the projection expects `(B, d_model)`.
+
+### Fix
+Added `"hidden_states": h` to HLRT's output dict (the normalized Tier 1 output before projection). This is the correct representation for distillation — it's the model's internal representation, not the vocabulary-projected output.
+
+---
+
+## BUG-005: Greedy generation not deterministic across runs (renamed from BUG-002)
 
 **Date**: Mar 10, 2026
 **Severity**: Medium (test reliability)

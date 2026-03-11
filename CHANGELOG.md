@@ -28,6 +28,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - 35 unit tests for inference pipeline (all passing)
 - KV cache wired into MultiHeadAttention, Tier1TokenProcessor, and HLRT forward pass
 
+- 50 integration tests covering all major subsystems (all passing)
+- HLRT now returns `hidden_states` in forward output for distillation compatibility
+
 ### Fixed
 - KV-cached generation now matches uncached output (skip tier gating during single-token decode, reuse prefill plan vector)
 - Greedy generation determinism (reset stateful plan vector between runs)
+- ACT-V replay buffer stored full batches instead of individual sequences (3D tensor on stack)
+- FlywheelTrainer `_mix_with_buffer` ignored `trace_mix_ratio=0` (always replaced at least 1 sample)

@@ -25,6 +25,30 @@ Session-level work tracking. Most recent session first.
 - **Phase 3+ NOT STARTED**: Distributed, vision, inference, conversion, MLX all empty stubs
 - **Next up**: Phase 3 (DiLoCo distributed training) or Phase 7 (CUDA inference pipeline) — depends on priority
 
+## Session 3 — Mar 10, 2026
+**Focus**: Phase 8 integration tests + bug fixes
+
+### Done
+- Wrote 50 integration tests across 13 test classes:
+  - Full training step (BootstrapTrainer → Orchestrator → HLRT)
+  - ACT-V adversarial co-training loop (Generator + Verifier + distillation)
+  - Progressive growth scheduling + adaptive triggers
+  - Flywheel cycle (generate traces → score → store → retrain)
+  - Memory persistence across sequences (working, episodic, semantic, controller)
+  - Tier routing activation rate benchmarks
+  - Optimizer comparison (Muon vs AdamW convergence)
+  - Memory overhead benchmark
+  - Reward function composition
+  - Data pipeline (quality filter + batcher + tokenizer + buffer)
+  - Checkpoint save/load roundtrip
+  - Train-then-generate pipeline
+  - WSD scheduler integration
+- Fixed 3 pre-existing bugs found by integration tests:
+  - BUG-002: ACT-V replay buffer stored batches, not sequences
+  - BUG-003: FlywheelTrainer ignored trace_mix_ratio=0
+  - BUG-004: HLRT missing hidden_states output for distillation
+- All 85 tests pass (50 integration + 35 unit) in 3.65s on CPU
+
 ## Session 2 — Mar 10, 2026
 **Focus**: KV cache integration + inference pipeline completion
 
@@ -36,7 +60,7 @@ Session-level work tracking. Most recent session first.
   - `genesis/inference/generator.py` — batch + streaming generation with KV cache
 - Wired KV cache into `MultiHeadAttention.forward()`, `Tier1TokenProcessor.forward()`, `HLRT.forward()`
 - Fixed KV-cached decode: skip tier gating on single-token decode, reuse prefill plan vector (BUG-001)
-- Fixed greedy determinism: reset `last_plan_vector` state between runs (BUG-002)
+- Fixed greedy determinism: reset `last_plan_vector` state between runs (BUG-005)
 - Scaled Tier 3 from 4 to 5 layers (483M → 496M params)
 - Wrote 35 unit tests (all passing)
 

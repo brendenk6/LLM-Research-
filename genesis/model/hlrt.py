@@ -293,6 +293,7 @@ class HLRT(StatefulModule):
 
             result: Dict[str, Any] = {
                 "logits": logits,
+                "hidden_states": h,
                 "aux_loss": torch.tensor(0.0, device=input_ids.device),
             }
             if return_tier_activations:
@@ -381,6 +382,7 @@ class HLRT(StatefulModule):
 
         result: Dict[str, Any] = {
             "logits": logits,
+            "hidden_states": h,
             "aux_loss": aux_loss,
         }
         if return_tier_activations:

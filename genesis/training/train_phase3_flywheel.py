@@ -300,7 +300,7 @@ class FlywheelTrainer:
         input_ids = batch["input_ids"]  # (B, S)
         B, S = input_ids.shape
 
-        if self.flywheel_buffer.size == 0:
+        if self.flywheel_buffer.size == 0 or self.trace_mix_ratio <= 0:
             return batch
 
         num_replace = max(1, int(B * self.trace_mix_ratio))

@@ -284,12 +284,14 @@ class ACTVTrainer:
             overall = v_scores["overall_score"]  # (B, 1)
         feedback_loss = (1.0 - overall).mean()
 
-        # Store in replay buffer
-        self.replay_buffer.add(
-            input_ids=input_ids,
-            scores=v_scores,
-            metadata={"step": self._step_count},
-        )
+        # Store individual sequences in replay buffer
+        for i in range(input_ids.size(0)):
+            seq_scores = {k: v[i] for k, v in v_scores.items()}
+            self.replay_buffer.add(
+                input_ids=input_ids[i],
+                scores=seq_scores,
+                metadata={"step": self._step_count},
+            )
 
         total = ntp_loss + self.config.alpha * feedback_loss
 

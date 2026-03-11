@@ -166,17 +166,17 @@ Master build plan. Checkboxes track completion status. Derived from GENESIS_BLUE
 ## Phase 8: Integration Testing & Benchmarks
 > End-to-end validation.
 
-- [ ] Full training step integration test
-- [ ] ACT-V adversarial loop test
-- [ ] Progressive growth + loss continuity test
-- [ ] Flywheel cycle test (generate -> filter -> retrain)
-- [ ] Memory persistence across sequences test
-- [ ] MLX end-to-end inference test
-- [ ] Benchmark: tier routing activation rates
-- [ ] Benchmark: Muon vs AdamW convergence
-- [ ] Benchmark: FP4 vs BF16 accuracy
-- [ ] Benchmark: memory scaling overhead
-- [ ] Benchmark: MLX tokens/sec on M1
+- [x] Full training step integration test
+- [x] ACT-V adversarial loop test
+- [x] Progressive growth + loss continuity test
+- [x] Flywheel cycle test (generate -> filter -> retrain)
+- [x] Memory persistence across sequences test
+- [ ] MLX end-to-end inference test (blocked: no MLX runtime yet)
+- [x] Benchmark: tier routing activation rates
+- [x] Benchmark: Muon vs AdamW convergence
+- [ ] Benchmark: FP4 vs BF16 accuracy (blocked: needs CUDA)
+- [x] Benchmark: memory scaling overhead
+- [ ] Benchmark: MLX tokens/sec on M1 (blocked: no MLX runtime yet)
 
 ---
 
