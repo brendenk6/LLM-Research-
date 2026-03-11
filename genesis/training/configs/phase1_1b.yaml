@@ -2,7 +2,7 @@
 # Training: NTP bootstrap on quality-filtered web data
 
 model:
-  vocab_size: 32000
+  vocab_size: 100287
   max_seq_len: 4096
 
   tier1:

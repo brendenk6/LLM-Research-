@@ -1,6 +1,6 @@
 # Phase 3: 40B MoE (8B active)
 model:
-  vocab_size: 32000
+  vocab_size: 100287
   max_seq_len: 4096
   tier1:
     layers: 12

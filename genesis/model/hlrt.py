@@ -35,7 +35,7 @@ class HLRTConfig:
     """Full configuration for the HLRT model."""
 
     # Vocabulary and embedding
-    vocab_size: int = 32000
+    vocab_size: int = 100287
     d_model: int = 1024
     padding_idx: int | None = None
     embedding_dropout: float = 0.0

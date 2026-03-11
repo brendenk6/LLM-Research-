@@ -29,7 +29,7 @@ SPECIAL_TOKENS: Dict[str, str] = {
 class _CharLevelBackend:
     """Minimal character-level tokenizer used when no BPE backend is available."""
 
-    def __init__(self, vocab_size: int = 32000) -> None:
+    def __init__(self, vocab_size: int = 100287) -> None:
         self._vocab_size = vocab_size
         # Reserve first 256 IDs for raw bytes, then special tokens
         self._special_token_offset = 256
@@ -98,7 +98,7 @@ class TokenizerWrapper:
     def __init__(
         self,
         backend: str = "tiktoken",
-        vocab_size: int = 32000,
+        vocab_size: int = 100287,
         sp_model_path: Optional[str] = None,
     ) -> None:
         self._backend_name: str = "none"

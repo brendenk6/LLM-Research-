@@ -1,6 +1,6 @@
 # Phase 2: 7B Parameter Scale-up
 model:
-  vocab_size: 32000
+  vocab_size: 100287
   max_seq_len: 4096
   tier1:
     layers: 12
