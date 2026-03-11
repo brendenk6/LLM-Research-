@@ -1,6 +1,14 @@
 # Phase 0: 50M Parameter Small-Scale Validation
 # Purpose: Prove the HLRT architecture works end-to-end before scaling up.
 # Train fast on a single GPU, validate loss curves, gating behavior, and tier routing.
+#
+# Parameter count: ~41M
+# Token budget:  ~2.6B tokens (10k steps × 128 batch × 2048 seq)
+# Chinchilla-optimal would be ~1B (3800 steps). We over-train intentionally
+# to get clear signal on whether the architecture works.
+#
+# Data prep:  python -m genesis.training.prepare_data --config genesis/training/configs/phase0_50m.yaml
+# Training:   python -m genesis.training.train_phase0 --config genesis/training/configs/phase0_50m.yaml
 
 model:
   vocab_size: 32000        # Smaller vocab (SentencePiece/BPE-32k) to save embedding params
@@ -58,17 +66,22 @@ training:
   batch_size: 64
   gradient_accumulation_steps: 2
   effective_batch_size: 128
-  max_steps: 10000
+  max_steps: 10000           # ~2.6B tokens. Stop early if loss plateaus.
   gradient_clip: 1.0
   checkpoint_interval: 500
   eval_interval: 250
   log_interval: 10
+  early_stop_patience: 1500  # Stop if val loss doesn't improve for 1500 steps
 
 data:
-  dataset: fineweb-edu
+  dataset: HuggingFaceFW/fineweb-edu
+  subset: sample-10BT       # 10B token sample — more than enough for 50M model
+  streaming: true            # Stream from HuggingFace, no full download needed
   quality_threshold: 0.7
   max_seq_len: 2048
+  val_ratio: 0.01            # 1% held out for validation
   num_workers: 4
+  packed_dir: data/packed_phase0  # Where to write packed binary files
 
 hardware:
   device: cuda
