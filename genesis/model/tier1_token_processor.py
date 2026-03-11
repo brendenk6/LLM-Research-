@@ -50,6 +50,8 @@ class TransformerBlock(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        kv_cache: Optional[object] = None,
+        position_offset: int = 0,
     ) -> torch.Tensor:
         """Forward pass.
 
@@ -57,13 +59,20 @@ class TransformerBlock(nn.Module):
             x: (B, S, d_model).
             cos, sin: RoPE tables.
             attention_mask: Optional additive attention mask.
+            kv_cache: Optional LayerKVCache for this layer.
+            position_offset: Starting position for RoPE with cache.
 
         Returns:
             (B, S, d_model).
         """
         # Attention sub-layer with pre-norm and residual.
         h = self.attn_norm(x)
-        h = self.attn(h, cos, sin, attention_mask=attention_mask)
+        h = self.attn(
+            h, cos, sin,
+            attention_mask=attention_mask,
+            kv_cache=kv_cache,
+            position_offset=position_offset,
+        )
         x = x + h
 
         # FFN sub-layer with pre-norm and residual.
@@ -130,18 +139,31 @@ class Tier1TokenProcessor(nn.Module):
         self,
         x: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        kv_cache: Optional[object] = None,
+        position_offset: int = 0,
     ) -> torch.Tensor:
         """Forward pass through all Transformer blocks.
 
         Args:
             x: (B, S, d_model).
             attention_mask: Optional additive mask.
+            kv_cache: Optional KVCache with one LayerKVCache per layer.
+            position_offset: Starting position for RoPE when using cache.
 
         Returns:
             (B, S, d_model).
         """
         S = x.size(1)
-        cos, sin = self.rotary_emb(S)
-        for layer in self.layers:
-            x = layer(x, cos, sin, attention_mask=attention_mask)
+        # Get RoPE tables for the full possible range
+        total_len = position_offset + S
+        cos, sin = self.rotary_emb(total_len)
+
+        for i, layer in enumerate(self.layers):
+            layer_cache = kv_cache[i] if kv_cache is not None else None
+            x = layer(
+                x, cos, sin,
+                attention_mask=attention_mask,
+                kv_cache=layer_cache,
+                position_offset=position_offset,
+            )
         return x

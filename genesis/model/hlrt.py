@@ -79,7 +79,7 @@ class HLRTConfig:
 
     # Tier 3: Deliberative Reasoner
     tier3_d_model: int = 1024
-    tier3_num_layers: int = 4
+    tier3_num_layers: int = 5
     tier3_num_heads: int = 8
     tier3_num_kv_heads: int | None = None
     tier3_d_ff: int | None = None
@@ -240,6 +240,8 @@ class HLRT(StatefulModule):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         return_tier_activations: bool = False,
+        kv_cache: Optional[Any] = None,
+        position_offset: int = 0,
     ) -> Dict[str, Any]:
         """Full hierarchical forward pass.
 
@@ -248,6 +250,8 @@ class HLRT(StatefulModule):
             attention_mask: Optional additive attention mask.
             return_tier_activations: If True, include intermediate tier outputs
                 in the return dict.
+            kv_cache: Optional KVCache for Tier 1 incremental decode.
+            position_offset: Starting position for RoPE when using cache.
 
         Returns:
             Dictionary with keys:
@@ -262,9 +266,38 @@ class HLRT(StatefulModule):
         x = self.embeddings(input_ids)  # (B, S, d_model)
 
         # ---- Tier 1: Token Processing ----
-        tier1_out = self.tier1(x, attention_mask=attention_mask)  # (B, S, d_model)
+        tier1_out = self.tier1(
+            x, attention_mask=attention_mask,
+            kv_cache=kv_cache, position_offset=position_offset,
+        )  # (B, S, d_model)
         if return_tier_activations:
             tier_activations["tier1"] = tier1_out
+
+        # During single-token cached decode, skip tier gating entirely.
+        # The gate needs chunk-level context to make meaningful decisions,
+        # which isn't available when processing a single token. Use the
+        # plan vector computed during prefill instead.
+        if kv_cache is not None and S == 1:
+            cached_plan = self.link_state("last_plan_vector")
+            if cached_plan.shape[0] == 1 and B > 1:
+                cached_plan = cached_plan.expand(B, -1)
+            elif cached_plan.shape[0] != B:
+                cached_plan = cached_plan[:1].expand(B, -1)
+            tier1_out = self.conditioning.apply_cached_plan(tier1_out, cached_plan)
+
+            h = self.output_norm(tier1_out)
+            if self.output_proj is not None:
+                logits = self.output_proj(h)
+            else:
+                logits = F.linear(h, self.embeddings.weight)
+
+            result: Dict[str, Any] = {
+                "logits": logits,
+                "aux_loss": torch.tensor(0.0, device=input_ids.device),
+            }
+            if return_tier_activations:
+                result["tier_activations"] = tier_activations
+            return result
 
         # ---- Gate 1->2: Select chunks for escalation ----
         gate1_mask, gate1_scores = self.gate1(tier1_out)  # (B, num_chunks), (B, num_chunks)
