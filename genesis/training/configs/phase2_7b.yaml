@@ -1,0 +1,47 @@
+# Phase 2: 7B Parameter Scale-up
+model:
+  vocab_size: 32000
+  max_seq_len: 4096
+  tier1:
+    layers: 12
+    d_model: 1024
+    heads: 16
+    d_ff: 4096
+  tier2:
+    layers: 24
+    d_model: 2048
+    heads: 32
+    d_ff: 8192
+    latent_vectors_per_chunk: 4
+    chunk_size: 32
+  tier3:
+    layers: 12
+    d_model: 1024
+    heads: 16
+    d_ff: 4096
+    recurrence_steps: 4
+  gate:
+    type: mlp
+    tier2_threshold: 0.3
+    tier3_threshold: 0.7
+  dropout: 0.0
+  use_flash_attention: true
+
+optimizer:
+  type: muon_adamw_hybrid
+  muon_lr: 0.02
+  adamw_lr: 3e-4
+  weight_decay: 0.01
+
+training:
+  phase: bootstrap
+  batch_size: 16
+  gradient_accumulation_steps: 8
+  max_steps: 200000
+  gradient_clip: 1.0
+
+hardware:
+  device: cuda
+  num_gpus: 8
+  precision: bf16
+  strategy: fsdp
