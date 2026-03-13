@@ -195,10 +195,8 @@ class Tier2SemanticPlanner(nn.Module):
 
     def load_balance_loss(self) -> torch.Tensor:
         """Aggregate load-balance loss from all MoE layers."""
-        total = torch.tensor(0.0)
+        total = None
         for layer in self.layers:
             lb = layer.load_balance_loss()
-            if lb.device != total.device:
-                total = total.to(lb.device)
-            total = total + lb
-        return total
+            total = lb if total is None else total + lb
+        return total if total is not None else torch.tensor(0.0)

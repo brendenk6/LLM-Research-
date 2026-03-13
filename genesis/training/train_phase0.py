@@ -35,11 +35,48 @@ from olympus.data.tokenizer import TokenizerWrapper
 from olympus.optim.muon_adamw_hybrid import MuonAdamWHybrid
 from olympus.optim.schedulers import WSDScheduler
 
+# DDP imports — optional, only needed for multi-GPU
+try:
+    import torch.distributed as dist
+    from torch.nn.parallel import DistributedDataParallel as DDP
+    from torch.utils.data.distributed import DistributedSampler
+    DDP_AVAILABLE = True
+except ImportError:
+    DDP_AVAILABLE = False
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# DDP helpers
+# ---------------------------------------------------------------------------
+
+def setup_ddp() -> tuple[int, int]:
+    """Initialise DDP if launched via torchrun. Returns (rank, world_size)."""
+    if not DDP_AVAILABLE:
+        return 0, 1
+    if "RANK" not in os.environ:
+        return 0, 1  # Single-GPU, no torchrun
+    dist.init_process_group(backend="nccl")
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    torch.cuda.set_device(rank)
+    return rank, world_size
+
+
+def cleanup_ddp() -> None:
+    """Destroy DDP process group if active."""
+    if DDP_AVAILABLE and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def is_main_process(rank: int) -> bool:
+    """True if this is rank 0 (or single-GPU)."""
+    return rank == 0
 
 
 def build_model(cfg: dict) -> HLRT:
@@ -114,15 +151,21 @@ def build_optimizer(model: HLRT, cfg: dict) -> MuonAdamWHybrid:
 
 
 def build_scheduler(optimizer: MuonAdamWHybrid, cfg: dict) -> WSDScheduler:
-    """Build the WSD learning rate scheduler."""
+    """Build the WSD learning rate scheduler.
+
+    All scheduler step counts are in optimizer steps (not micro-steps).
+    total_steps = max_steps / gradient_accumulation_steps.
+    """
     sched_cfg = cfg["scheduler"]
     train_cfg = cfg["training"]
+    grad_accum = train_cfg.get("gradient_accumulation_steps", 1)
+    total_opt_steps = train_cfg.get("max_steps", 10000) // grad_accum
     return WSDScheduler(
         optimizer=optimizer,
         base_lr=sched_cfg.get("peak_lr", 0.02),
         min_lr=sched_cfg.get("min_lr", 2e-5),
         warmup_steps=sched_cfg.get("warmup_steps", 500),
-        total_steps=train_cfg.get("max_steps", 10000),
+        total_steps=total_opt_steps,
         decay_steps=sched_cfg.get("decay_steps", 500),
     )
 
@@ -137,12 +180,26 @@ def train(
     data_cfg = cfg["data"]
     hw_cfg = cfg.get("hardware", {})
 
+    # --- DDP setup ---
+    rank, world_size = setup_ddp()
+    ddp = world_size > 1
+
     requested_device = hw_cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu")
     if requested_device == "cuda" and not torch.cuda.is_available():
         logger.warning("CUDA requested but not available — falling back to CPU")
         requested_device = "cpu"
-    device = torch.device(requested_device)
-    logger.info("Device: %s", device)
+    if requested_device == "mps" and not torch.backends.mps.is_available():
+        logger.warning("MPS requested but not available — falling back to CPU")
+        requested_device = "cpu"
+    device = torch.device(requested_device if not ddp else f"cuda:{rank}")
+    if is_main_process(rank):
+        logger.info("Device: %s (world_size=%d)", device, world_size)
+
+    # --- CUDA speed optimizations ---
+    if device.type == "cuda":
+        torch.set_float32_matmul_precision("high")  # TF32 tensor cores
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     # --- Data ---
     packed_dir = data_cfg.get("packed_dir", "data/packed_phase0")
@@ -152,27 +209,53 @@ def train(
             "  python -m genesis.training.prepare_data --config genesis/training/configs/phase0_50m.yaml",
             packed_dir,
         )
+        cleanup_ddp()
         return
 
     train_ds = PackedDataset(packed_dir, split="train")
     val_ds = PackedDataset(packed_dir, split="val")
 
-    logger.info("Train: %s", train_ds)
-    logger.info("Val:   %s", val_ds)
+    if is_main_process(rank):
+        logger.info("Train: %s", train_ds)
+        logger.info("Val:   %s", val_ds)
 
     batch_size = train_cfg.get("batch_size", 64)
     grad_accum = train_cfg.get("gradient_accumulation_steps", 2)
     pin = device.type == "cuda"
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=data_cfg.get("num_workers", 4), pin_memory=pin)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=pin)
+    n_workers = data_cfg.get("num_workers", 4)
+    prefetch = 2 if pin and n_workers > 0 else None
+
+    # DDP: each rank gets a different data shard
+    train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True) if ddp else None
+    val_sampler = DistributedSampler(val_ds, num_replicas=world_size, rank=rank, shuffle=False) if ddp else None
+
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size,
+        shuffle=(train_sampler is None),  # Shuffle only if no DDP sampler
+        sampler=train_sampler,
+        num_workers=n_workers, pin_memory=pin,
+        prefetch_factor=prefetch,
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size,
+        shuffle=False, sampler=val_sampler,
+        num_workers=min(n_workers, 2), pin_memory=pin,
+        prefetch_factor=prefetch,
+    )
 
     # --- Model ---
     model = build_model(cfg)
     model = model.to(device)
 
-    # Mixed precision
+    # torch.compile — massive speedup from kernel fusion (CUDA only)
+    if device.type == "cuda" and hw_cfg.get("use_torch_compile", True):
+        if is_main_process(rank):
+            logger.info("Compiling model with torch.compile...")
+        model = torch.compile(model)
+
+    # Mixed precision (only on CUDA — MPS bf16 autocast is unreliable)
     use_amp = hw_cfg.get("precision", "bf16") == "bf16" and device.type == "cuda"
-    scaler = torch.amp.GradScaler(device.type, enabled=(use_amp and hw_cfg.get("precision") != "bf16"))
+    scaler = torch.amp.GradScaler("cuda", enabled=(use_amp and hw_cfg.get("precision") != "bf16"))
     amp_dtype = torch.bfloat16 if hw_cfg.get("precision") == "bf16" else torch.float16
 
     # --- Optimizer & Scheduler ---
@@ -183,10 +266,18 @@ def train(
     start_step = 0
     if resume_path and Path(resume_path).exists():
         ckpt = torch.load(resume_path, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model_state_dict"])
+        state_dict = ckpt["model_state_dict"]
+        _unwrap_model(model).load_state_dict(state_dict)
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         start_step = ckpt.get("step", 0)
-        logger.info("Resumed from step %d", start_step)
+        if is_main_process(rank):
+            logger.info("Resumed from step %d", start_step)
+
+    # --- DDP wrapping (after resume, so state dict keys match) ---
+    if ddp:
+        model = DDP(model, device_ids=[rank])
 
     # --- Training ---
     max_steps = train_cfg.get("max_steps", 10000)
@@ -196,7 +287,8 @@ def train(
     grad_clip = train_cfg.get("gradient_clip", 1.0)
     early_stop_patience = train_cfg.get("early_stop_patience", 1500)
 
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    if is_main_process(rank):
+        os.makedirs(checkpoint_dir, exist_ok=True)
 
     global_step = start_step
     best_val_loss = float("inf")
@@ -204,24 +296,37 @@ def train(
     tokens_seen = 0
     epoch = 0
 
-    logger.info("=" * 60)
-    logger.info("Phase 0 Training — 50M HLRT")
-    logger.info("  Max steps:     %d", max_steps)
-    logger.info("  Batch size:    %d × %d accum = %d effective", batch_size, grad_accum, batch_size * grad_accum)
-    logger.info("  Seq len:       %d", data_cfg.get("max_seq_len", 2048))
-    logger.info("  AMP:           %s (%s)", use_amp, amp_dtype)
-    logger.info("=" * 60)
+    if is_main_process(rank):
+        eff_batch = batch_size * grad_accum * world_size
+        logger.info("=" * 60)
+        logger.info("Phase 0 Training — HLRT")
+        logger.info("  Max steps:     %d", max_steps)
+        logger.info("  Batch size:    %d × %d accum × %d GPU = %d effective",
+                     batch_size, grad_accum, world_size, eff_batch)
+        logger.info("  Seq len:       %d", data_cfg.get("max_seq_len", 2048))
+        logger.info("  AMP:           %s (%s)", use_amp, amp_dtype)
+        logger.info("  torch.compile: %s", device.type == "cuda" and hw_cfg.get("use_torch_compile", True))
+        logger.info("  DDP:           %s (world_size=%d)", ddp, world_size)
+        logger.info("=" * 60)
 
     model.train()
     train_start = time.time()
 
     while global_step < max_steps:
         epoch += 1
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)  # Proper shuffling per epoch in DDP
+
         for batch in train_loader:
             if global_step >= max_steps:
                 break
 
-            input_ids = batch["input_ids"].to(device)
+            input_ids = batch["input_ids"]
+            # Slice to max_seq_len if data blocks are longer (e.g. 4096 -> 1024)
+            max_seq = cfg["model"].get("max_seq_len", input_ids.shape[1])
+            if input_ids.shape[1] > max_seq:
+                input_ids = input_ids[:, :max_seq]
+            input_ids = input_ids.to(device)
 
             # Forward + backward with gradient accumulation
             with torch.amp.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
@@ -235,74 +340,88 @@ def train(
                 loss = loss / grad_accum
 
             loss.backward()
-            tokens_seen += input_ids.numel()
+            tokens_seen += input_ids.numel() * world_size  # Count across all GPUs
 
             if (global_step + 1) % grad_accum == 0:
                 if grad_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                else:
+                    grad_norm = None
                 optimizer.step()
                 scheduler.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)  # Slightly faster than zero_grad()
 
             global_step += 1
 
-            # --- Logging ---
-            if global_step % log_interval == 0:
+            # --- Logging (rank 0 only) ---
+            if global_step % log_interval == 0 and is_main_process(rank):
                 real_loss = loss.item() * grad_accum
                 ppl = min(math.exp(real_loss), 1e6) if real_loss < 20 else 1e6
                 elapsed = time.time() - train_start
                 tok_per_sec = tokens_seen / max(elapsed, 1)
+                gn_str = f" | grad_norm={grad_norm:.2f}" if grad_norm is not None else ""
                 logger.info(
-                    "Step %5d/%d | loss=%.4f | ppl=%.1f | lr=%.2e | %.0f tok/s | %.1fM tokens",
+                    "Step %5d/%d | loss=%.4f | ppl=%.1f | lr=%.2e | %.0f tok/s | %.1fM tok%s",
                     global_step, max_steps, real_loss, ppl,
-                    scheduler.last_lr, tok_per_sec, tokens_seen / 1e6,
+                    scheduler.last_lr, tok_per_sec, tokens_seen / 1e6, gn_str,
                 )
 
             # --- Eval ---
             if global_step % eval_interval == 0:
                 val_loss = evaluate(model, val_loader, device, use_amp, amp_dtype)
-                val_ppl = min(math.exp(val_loss), 1e6) if val_loss < 20 else 1e6
-                logger.info(
-                    "  [EVAL] Step %d | val_loss=%.4f | val_ppl=%.1f",
-                    global_step, val_loss, val_ppl,
-                )
+
+                # Average val loss across ranks for DDP
+                if ddp:
+                    val_loss_t = torch.tensor(val_loss, device=device)
+                    dist.all_reduce(val_loss_t, op=dist.ReduceOp.AVG)
+                    val_loss = val_loss_t.item()
+
+                if is_main_process(rank):
+                    val_ppl = min(math.exp(val_loss), 1e6) if val_loss < 20 else 1e6
+                    logger.info(
+                        "  [EVAL] Step %d | val_loss=%.4f | val_ppl=%.1f",
+                        global_step, val_loss, val_ppl,
+                    )
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     steps_without_improvement = 0
-                    # Save best model
-                    save_checkpoint(model, optimizer, global_step, checkpoint_dir, "best.pt")
+                    if is_main_process(rank):
+                        save_checkpoint(model, optimizer, global_step, checkpoint_dir, "best.pt", scheduler)
                 else:
                     steps_without_improvement += eval_interval
                     if steps_without_improvement >= early_stop_patience:
-                        logger.info(
-                            "Early stopping at step %d (no improvement for %d steps)",
-                            global_step, early_stop_patience,
-                        )
+                        if is_main_process(rank):
+                            logger.info(
+                                "Early stopping at step %d (no improvement for %d steps)",
+                                global_step, early_stop_patience,
+                            )
                         break
 
                 model.train()
 
             # --- Checkpoint ---
-            if global_step % save_interval == 0:
+            if global_step % save_interval == 0 and is_main_process(rank):
                 save_checkpoint(model, optimizer, global_step, checkpoint_dir,
-                                f"checkpoint_step{global_step}.pt")
+                                f"checkpoint_step{global_step}.pt", scheduler)
 
         # Check early stop from inner loop break
         if steps_without_improvement >= early_stop_patience:
             break
 
     elapsed = time.time() - train_start
-    logger.info("=" * 60)
-    logger.info("Training complete!")
-    logger.info("  Steps:       %d", global_step)
-    logger.info("  Tokens seen: %.2fM", tokens_seen / 1e6)
-    logger.info("  Wall time:   %.1f min", elapsed / 60)
-    logger.info("  Best val:    %.4f", best_val_loss)
-    logger.info("=" * 60)
+    if is_main_process(rank):
+        logger.info("=" * 60)
+        logger.info("Training complete!")
+        logger.info("  Steps:       %d", global_step)
+        logger.info("  Tokens seen: %.2fM", tokens_seen / 1e6)
+        logger.info("  Wall time:   %.1f min", elapsed / 60)
+        logger.info("  Best val:    %.4f", best_val_loss)
+        logger.info("=" * 60)
 
-    # Final save
-    save_checkpoint(model, optimizer, global_step, checkpoint_dir, "final.pt")
+        save_checkpoint(model, optimizer, global_step, checkpoint_dir, "final.pt", scheduler)
+
+    cleanup_ddp()
 
 
 def evaluate(
@@ -317,9 +436,11 @@ def evaluate(
     total_loss = 0.0
     n_batches = 0
 
+    max_seq = 1024  # Match training seq len
+    max_eval_batches = 100  # Cap eval to avoid hours-long val passes
     with torch.no_grad():
         for batch in val_loader:
-            input_ids = batch["input_ids"].to(device)
+            input_ids = batch["input_ids"][:, :max_seq].to(device)
             with torch.amp.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
                 out = model(input_ids)
                 logits = out["logits"][:, :-1, :].contiguous()
@@ -327,24 +448,40 @@ def evaluate(
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
             total_loss += loss.item()
             n_batches += 1
+            if n_batches >= max_eval_batches:
+                break
 
     return total_loss / max(n_batches, 1)
 
 
+def _unwrap_model(model):
+    """Unwrap DDP and torch.compile wrappers to get the raw model."""
+    if hasattr(model, "module"):  # DDP
+        model = model.module
+    if hasattr(model, "_orig_mod"):  # torch.compile
+        model = model._orig_mod
+    return model
+
+
 def save_checkpoint(
-    model: HLRT,
+    model,
     optimizer: MuonAdamWHybrid,
     step: int,
     checkpoint_dir: str,
     filename: str,
+    scheduler=None,
 ) -> None:
-    """Save a checkpoint."""
+    """Save a checkpoint (auto-unwraps DDP/compile wrappers)."""
     path = os.path.join(checkpoint_dir, filename)
-    torch.save({
+    raw = _unwrap_model(model)
+    data = {
         "step": step,
-        "model_state_dict": model.state_dict(),
+        "model_state_dict": raw.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
-    }, path)
+    }
+    if scheduler is not None:
+        data["scheduler_state_dict"] = scheduler.state_dict()
+    torch.save(data, path)
     logger.info("Checkpoint saved: %s", path)
 
 

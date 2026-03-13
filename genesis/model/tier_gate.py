@@ -118,5 +118,8 @@ class TierGate(nn.Module):
         chunk_load = scores.mean(dim=0)  # (num_chunks,)
         # Ideal: each chunk has equal probability of being selected
         # Loss: coefficient of variation across chunks
-        loss = chunk_load.float().var() + (mean_activation.float().var())
+        # Manual variance — torch.var() produces NaN on MPS
+        cl = chunk_load.float()
+        ma = mean_activation.float()
+        loss = (cl - cl.mean()).pow(2).mean() + (ma - ma.mean()).pow(2).mean()
         return loss

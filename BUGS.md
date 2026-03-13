@@ -105,6 +105,130 @@ Added `"hidden_states": h` to HLRT's output dict (the normalized Tier 1 output b
 
 ---
 
+## BUG-006: torch.var() returns NaN on MPS (Apple Silicon)
+
+**Date**: Mar 11, 2026
+**Severity**: Critical (training produces NaN loss)
+**Status**: FIXED
+
+### Symptom
+Phase 0 training on M1 Mac produces `loss=nan` from step 1. All training steps show NaN, model weights immediately corrupted.
+
+### Root Cause
+`TierGate.load_balance_loss()` used `torch.var()` to compute variance of gate scores. On MPS, `torch.var()` returns NaN when values are small or tightly clustered (gate sigmoid outputs were all ~0.4998-0.5009). This is a known MPS backend bug.
+
+The NaN `aux_loss` propagated: `total_loss = cross_entropy + aux_loss` = NaN. Backward pass produced NaN gradients in all 81 parameter tensors, permanently corrupting the model on step 1.
+
+The cross-entropy loss itself was correct (11.6, expected for random init with 100K vocab). The forward pass was clean — only `aux_loss` was NaN.
+
+### Fix
+```python
+# Before (broken on MPS):
+loss = chunk_load.float().var() + (mean_activation.float().var())
+
+# After (works everywhere):
+cl = chunk_load.float()
+ma = mean_activation.float()
+loss = (cl - cl.mean()).pow(2).mean() + (ma - ma.mean()).pow(2).mean()
+```
+
+### Secondary fix
+`Tier2SemanticPlanner.load_balance_loss()` created `torch.tensor(0.0)` on CPU then accumulated MPS tensors into it, causing device mismatch:
+```python
+# Before:
+total = torch.tensor(0.0)  # CPU
+total = total + lb  # lb is on MPS -> device mismatch
+
+# After:
+total = None
+for layer in self.layers:
+    lb = layer.load_balance_loss()
+    total = lb if total is None else total + lb
+return total if total is not None else torch.tensor(0.0)
+```
+
+---
+
+## BUG-007: OOM on M1 16GB with 100K vocab at seq_len=4096
+
+**Date**: Mar 11, 2026
+**Severity**: High (training killed by OS)
+**Status**: FIXED
+
+### Symptom
+Training killed with exit code 137 (SIGKILL/OOM) even at batch_size=1 with 4096 sequence length.
+
+### Root Cause
+Two memory killers compounding on unified memory (CPU + GPU share 16GB):
+1. **Logits tensor**: 1 × 4096 × 100,287 × 4 bytes = 1.6GB. Backward pass doubles this.
+2. **Attention maps without Flash Attention**: Tier1 alone stores 4 layers × 6 heads × 4096 × 4096 × 4 bytes = 1.5GB for backward. Flash Attention avoids materializing this, but isn't available on MPS.
+3. **DataLoader workers**: `num_workers=2` forks Python processes, each inheriting parent memory footprint.
+
+Total: model (270MB) + optimizer (810MB) + attention maps (1.5GB) + logits+grads (3.2GB) + workers (~1GB) > 16GB.
+
+### Fix
+Three changes in `phase0_50m_mac.yaml`:
+- `batch_size: 1` (was 4)
+- `max_seq_len: 1024` (was 4096, blocks sliced in training loop)
+- `num_workers: 0` (was 2, eliminates forked process overhead)
+
+At seq_len=1024: attention maps = 96MB, logits = 400MB. Fits comfortably.
+
+---
+
+## BUG-008: Eval loop takes ~8 hours per evaluation
+
+**Date**: Mar 11, 2026
+**Severity**: Medium (training stalls)
+**Status**: FIXED
+
+### Symptom
+Training hangs at step 250 (first eval checkpoint). Process still alive but no new training steps logged.
+
+### Root Cause
+`evaluate()` iterated over ALL 56,572 validation blocks at batch_size=1. At ~0.5s per forward pass, that's ~7.8 hours per eval. Eval runs every 250 training steps.
+
+### Fix
+```python
+max_eval_batches = 100
+# ...
+if n_batches >= max_eval_batches:
+    break
+```
+100 batches at batch=1 takes ~50 seconds. Statistically sufficient for val loss estimation.
+
+---
+
+## BUG-009: WSD scheduler total_steps counts micro-steps instead of optimizer steps
+
+**Date**: Mar 12, 2026
+**Severity**: High (incorrect LR schedule)
+**Status**: FIXED
+
+### Symptom
+LR never reaches decay phase. During 10K-step run with `grad_accum=32`, LR stayed at peak (0.02) for the entire stable+decay range because the scheduler thought it had 10,000 steps but only received 312 `scheduler.step()` calls.
+
+### Root Cause
+`build_scheduler()` passed `total_steps=train_cfg["max_steps"]` (micro-steps) to `WSDScheduler`. But `scheduler.step()` is called once per optimizer step (every `grad_accum` micro-steps). With `max_steps=10000` and `grad_accum=32`:
+- Scheduler expects 10,000 steps, decay starts at step 9,984
+- Only 312 scheduler steps actually happen (10000/32)
+- Scheduler never reaches decay phase
+
+### Fix
+```python
+# Before:
+total_steps=train_cfg.get("max_steps", 10000)
+
+# After:
+grad_accum = train_cfg.get("gradient_accumulation_steps", 1)
+total_opt_steps = train_cfg.get("max_steps", 10000) // grad_accum
+# ... total_steps=total_opt_steps
+```
+
+Also added scheduler state to checkpoints (`scheduler_state_dict`) so LR schedule survives resume.
+
+---
+
 ## BUG-005: Greedy generation not deterministic across runs (renamed from BUG-002)
 
 **Date**: Mar 10, 2026

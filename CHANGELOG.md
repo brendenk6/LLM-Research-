@@ -8,6 +8,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ## [Unreleased]
 
 ### Added
+- Lambda H100 speed optimizations in training pipeline:
+  - TF32 tensor cores (auto-enabled on CUDA)
+  - `torch.compile` model compilation (configurable via `use_torch_compile`)
+  - DDP multi-GPU support via `torchrun` with `DistributedDataParallel`
+  - DataLoader prefetch (`prefetch_factor=2`) for async data loading
+  - Gradient norm logging for spike detection
+  - `zero_grad(set_to_none=True)` for faster gradient clearing
+- SDPA attention backend: `_vanilla_attention` now uses `F.scaled_dot_product_attention` on CUDA/MPS — gets flash attention without the external `flash_attn` package
+- 124M Lambda training config (`genesis/training/configs/phase0_124m_lambda.yaml`):
+  - GPT-2 124M scale validation run (~$10 on H100)
+  - Vocab padded to 100,352 (128-aligned for GPU kernel efficiency)
+  - GPT-3 hyperparams: LR 6e-4, beta2=0.95, weight_decay=0.1, 715 warmup steps
+- Launch script (`launch_lambda.sh`) for single-GPU and multi-GPU DDP training
+- `_unwrap_model()` helper for clean checkpoint save/resume through DDP + torch.compile wrappers
+- Phase 0 M1 Mac training pipeline (`genesis/training/train_phase0.py`, `genesis/training/prepare_data.py`)
+- 50M param config for M1 Mac (`genesis/training/configs/phase0_50m_mac.yaml`)
+- TierComposer: LEGO-style tier composition for building models from independently trained tiers (`genesis/model/tier_composer.py`)
+- MPS device support in training pipeline (fallback detection, AMP disabled)
+- Eval loop batch cap (100 batches) for reasonable eval times on small hardware
+- SFT fine-tuning pipeline (`genesis/training/train_sft.py`) — instruction masking, GENESIS special token formatting
+- GirlyPopQuartz data converter (`convert_gpq_to_sft.py`) — 45K social/conversational examples
+- Combined SFT dataset: 70K examples (Platypus reasoning + GirlyPopQuartz social)
+- Generation sampling scripts (`sample_phase0.py`, `sample_sft.py`)
+- Scheduler state persistence in checkpoints (save + restore on resume)
+
+### Changed
+- Extended Phase 0 pretraining from 10K to 50K steps (val_loss 9.57 → 5.84)
+- Updated config for 50K steps with corrected scheduler parameters
+
+### Fixed
+- `torch.var()` NaN on MPS in `TierGate.load_balance_loss()` — replaced with manual variance
+- CPU/MPS device mismatch in `Tier2SemanticPlanner.load_balance_loss()` — eliminated CPU tensor creation
+- OOM on M1 16GB with 100K vocab — reduced batch to 1, seq_len to 1024, disabled DataLoader workers
+- WSD scheduler `total_steps` counted micro-steps instead of optimizer steps — LR never reached decay phase
+
+### Previously added
 - Olympus training framework: StatefulModule, MemoryBus, ComputeRouter, TrainingOrchestrator, GrowthController
 - Muon optimizer + MuonAdamWHybrid + WSD scheduler
 - 6 Triton kernels with PyTorch fallbacks (FP4 quantize/matmul, fused gate routing, sparse expert matmul, memory cross-attention, Muon step)

@@ -168,18 +168,29 @@ class MultiHeadAttention(nn.Module):
         v: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Standard scaled dot-product attention with causal mask."""
+        """Scaled dot-product attention via PyTorch SDPA.
+
+        Uses F.scaled_dot_product_attention which automatically selects the
+        fastest available backend (FlashAttention, memory-efficient, or math).
+        Falls back to manual implementation only on MPS where SDPA may not
+        support all features.
+        """
         S_q = q.size(2)
         S_kv = k.size(2)
-        scale = 1.0 / math.sqrt(self.head_dim)
 
-        # (B, H, S_q, S_kv)
+        # PyTorch SDPA handles causal masking and dropout natively
+        if q.is_cuda or (hasattr(torch.backends, "mps") and q.is_mps and S_q == S_kv):
+            return F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=attention_mask,
+                dropout_p=self.dropout_p if self.training else 0.0,
+                is_causal=(attention_mask is None and S_q == S_kv),
+            )
+
+        # Manual fallback for MPS decode (S_q != S_kv) or CPU
+        scale = 1.0 / math.sqrt(self.head_dim)
         attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
 
-        # Causal mask: each query position can only attend to positions <= itself.
-        # When S_q < S_kv (decode with cache), the query at position i
-        # (absolute position = S_kv - S_q + i) can attend to all positions
-        # up to and including itself.
         causal_mask = torch.triu(
             torch.full((S_q, S_kv), float("-inf"), device=q.device, dtype=q.dtype),
             diagonal=S_kv - S_q + 1,

@@ -1,0 +1,87 @@
+# Phase 0: 124M Parameter — Lambda H100 Training
+# Matches GPT-2 124M scale to validate pipeline before scaling to 500M/1B.
+# Uses existing packed data (tiktoken cl100k_base, padded vocab for GPU alignment).
+#
+# Parameter count: ~124M (with 100K+ vocab, weight-tied)
+# Effective batch: 32 × 16 accum × 1 GPU = 512 sequences × 1024 = ~524K tok/step
+# Token budget:  ~20B tokens (target: match/beat Karpathy's GPT-2 repro)
+#
+# Single GPU:
+#   python -m genesis.training.train_phase0 --config genesis/training/configs/phase0_124m_lambda.yaml
+#
+# Multi-GPU (DDP):
+#   torchrun --nproc_per_node=8 -m genesis.training.train_phase0 --config genesis/training/configs/phase0_124m_lambda.yaml
+
+model:
+  vocab_size: 100352           # Padded from 100287 to nearest 128 multiple (GPU alignment)
+  max_seq_len: 1024
+
+  tier1:
+    layers: 8
+    d_model: 512
+    heads: 8
+    d_ff: 2048
+
+  tier2:
+    layers: 4
+    d_model: 768
+    heads: 8
+    d_ff: 3072
+    latent_vectors_per_chunk: 4
+    chunk_size: 32
+
+  tier3:
+    layers: 2
+    d_model: 512
+    heads: 8
+    d_ff: 2048
+    recurrence_steps: 2
+
+  gate:
+    type: mlp
+    tier2_threshold: 0.3
+    tier3_threshold: 0.7
+
+  dropout: 0.0               # No dropout at this scale (following Karpathy)
+  use_flash_attention: true
+  rope_base: 10000.0
+
+optimizer:
+  type: muon_adamw_hybrid
+  muon_lr: 0.02
+  adamw_lr: 6.0e-4            # GPT-3 124M used 6e-4
+  muon_momentum: 0.95
+  adamw_betas: [0.9, 0.95]    # GPT-3 beta2 = 0.95 (not 0.999)
+  weight_decay: 0.1           # GPT-3 used 0.1 (not 0.01)
+  ns_iterations: 5
+
+scheduler:
+  type: wsd
+  warmup_steps: 715           # GPT-3 used 375M warmup tokens / 524K tok/step ≈ 715
+  decay_steps: 3000           # Cosine decay over last ~8%
+  peak_lr: 0.02
+  min_lr: 6.0e-5              # 10% of peak AdamW LR
+
+training:
+  phase: bootstrap
+  batch_size: 32
+  gradient_accumulation_steps: 16   # Effective = 512 sequences = ~524K tok/step
+  effective_batch_size: 512
+  max_steps: 40000            # ~20B tokens at 524K tok/step
+  gradient_clip: 1.0
+  checkpoint_interval: 2000
+  eval_interval: 500
+  log_interval: 10
+  early_stop_patience: 5000
+
+data:
+  max_seq_len: 1024
+  val_ratio: 0.01
+  num_workers: 4
+  packed_dir: packed           # Reuse existing 11.6B token dataset (will cycle ~2 epochs)
+
+hardware:
+  device: cuda
+  num_gpus: 1                  # Set to 8 and use torchrun for multi-GPU
+  precision: bf16
+  use_torch_compile: true
